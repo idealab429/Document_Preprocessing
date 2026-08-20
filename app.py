@@ -71,7 +71,7 @@ st.markdown("""
     --measure: 720px;
     --content: 1200px;
 
-    /* 상단 여백 — Streamlit 상단 헤더 */
+    /* 상단 여백 — Streamlit 상단 헤더(약 60px)를 확실히 비켜야 제목이 안 잘림 */
     --gutter-top: 72px;
 
     /* 색 */
@@ -216,7 +216,7 @@ UNIT_FILES = {
 }
 INTEGRATED_CSV = UNIT_DIR / 'integrated.csv'
 META_CSV       = UNIT_DIR / 'metadata.csv'
-CUSTOM_SW_CSV  = UNIT_DIR / 'custom_stopwords.csv'
+STOPWORDS_CSV  = UNIT_DIR / 'stopwords.csv'   # 기본 + 추가 불용어를 한 파일로 관리
 
 # ── 계산 결과 저장 (화면은 원본 대신 이 파일들만 읽는다) ──
 #    문서가 늘어나도 화면 속도가 유지되도록 하기 위함
@@ -232,9 +232,23 @@ META_COLS  = ['파일명', '문서유형', '작성자유형', '처리일시']
 
 AUTHOR_TYPES = ['Human', 'AI']
 DOC_TYPES    = ['report', 'essay']     # 드라이브에 폴더를 만들면 자동 추가됨
-DATA_FOLDER  = 'DATA'                   
+DATA_FOLDER  = 'DATA'                   # Human/AI 입력 폴더를 감싸는 상위 폴더
 
 MASTER_SHEET_NAME = '문서분석_마스터시트'
+
+# 사이드바에 항상 표시할 문서 보관 위치 (드라이브 폴더명이 바뀌면 여기만 수정)
+DRIVE_PATH_HINT = 'idealab429 드라이브 › IBA_DocPreprocessing › DATA'
+
+# 불용어 파일 열 구성 — 기본(시드)과 사용자 추가분을 한 파일에서 함께 관리한다
+STOPWORDS_COLS = ['불용어', '구분', '등록일시']
+
+# 지표 산출 근거 논문 (APA 7판)
+SOURCE_YAO_2024 = (
+    'Yao, Z., Hong, T., & Kim, E. (2024). Does diverse information enhance the '
+    'helpfulness of online reviews? A diversity perspective based on topic modeling '
+    'and sentiment analysis. Journal of Intelligence and Information Systems, 30(4), '
+    '41–69. https://doi.org/10.13088/jiis.2024.30.4.041'
+)
 
 # ── 감성사전 ──
 #    KNU를 기본으로 고정한다. IBA_DCX는 참고용 비교 기능으로만 제공한다.
@@ -253,7 +267,7 @@ LDA_MIN_DOCS    = 30      # 이 미만이면 내용 다양성 신뢰도 경고
 LDA_RANDOM_SEED = 42      # 재현성 확보
 
 # 단어 조회 화면에서 기본 표시할 주요 단어
-# 후속 연구에서 이 목록만 교체하면 됨 (현재는 임의 선정)
+# 후속 연구자는 이 목록만 교체하면 됨 (현재는 임의 선정)
 KEY_WORDS = ['분석', '연구', '결과', '방법', '데이터',
              '중요', '필요', '문제', '효과', '영향']
 
@@ -354,6 +368,7 @@ DIVERSITY_INFO = {
             "값이 높을수록 다양한 주제를 균형 있게 포함하며, 서로 다른 "
             "내용 요소를 폭넓게 다루는 문서로 해석된다."
         ),
+        "source": SOURCE_YAO_2024,
     },
 
     D_SEN: {
@@ -381,6 +396,7 @@ DIVERSITY_INFO = {
             "현재 계산에서는 긍정·부정의 2개 감성 범주와 "
             "밑이 2인 로그(log₂)를 사용한다."
         ),
+        "source": SOURCE_YAO_2024,
     },
 
     D_BUR: {
@@ -463,6 +479,10 @@ def render_diversity_description(metric):
     if info.get("note"):
         st.caption(info["note"])
 
+    # 산출식의 근거 논문 (있는 지표만)
+    if info.get("source"):
+        st.caption(f"출처: {info['source']}")
+
 # 색상 (대시보드 그래프)
 C_TARGET = '#DD8452'      # 현재 문서
 C_HUMAN  = '#4C72B0'
@@ -476,7 +496,7 @@ SYNC_FILES = {
     'document.csv':         UNIT_FILES['document'],
     'integrated.csv':       INTEGRATED_CSV,
     'metadata.csv':         META_CSV,
-    'custom_stopwords.csv': CUSTOM_SW_CSV,
+    'stopwords.csv':        STOPWORDS_CSV,
     'metrics.csv':          METRICS_CSV,
     'word_freq.csv':        WORD_FREQ_CSV,
     'doc_freq.csv':         DOC_FREQ_CSV,
@@ -494,15 +514,15 @@ def init_local_csvs():
     if not META_CSV.exists():
         pd.DataFrame(columns=META_COLS).to_csv(
             META_CSV, index=False, encoding='utf-8-sig')
-    if not CUSTOM_SW_CSV.exists():
-        pd.DataFrame(columns=['불용어']).to_csv(
-            CUSTOM_SW_CSV, index=False, encoding='utf-8-sig')
+    init_stopwords_file()
 
 
 # ============================================================
-# 워드클라우드 전용 불용어
+# 기본 불용어 시드
+#   stopwords.csv가 없을 때 최초 1회만 사용된다.
+#   이후의 실제 적용 목록은 output/stopwords.csv가 유일한 기준이다.
 # ============================================================
-WC_STOPWORDS = {
+SEED_STOPWORDS = {
     '이', '그', '저', '것', '거', '곳', '수', '좀', '처럼', '까지', '에도', '에도요',
     '이나', '라도',
     '그리고', '그래서', '그러나', '하지만', '또한', '즉', '결국', '때문에', '그래도',
@@ -1107,18 +1127,80 @@ def reset_all(service, output_id):
         )
 
 
-# ── 사용자 추가 불용어 ──
-def load_custom_stopwords():
-    if not CUSTOM_SW_CSV.exists():
-        return set()
-    df = pd.read_csv(CUSTOM_SW_CSV, encoding='utf-8-sig')
-    return set(df['불용어'].dropna().astype(str))
+# ── 불용어 관리 (output/stopwords.csv 한 파일로 통합) ──
+def _now_stamp():
+    return datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 
-def save_custom_stopwords(words):
-    pd.DataFrame({'불용어': sorted(words)}).to_csv(
-        CUSTOM_SW_CSV, index=False, encoding='utf-8-sig')
-    drive_upload_csv(service, OUTPUT_ID, 'custom_stopwords.csv', CUSTOM_SW_CSV)
+def init_stopwords_file():
+    """stopwords.csv가 없으면 기본 불용어(SEED_STOPWORDS)로 최초 생성한다."""
+    if STOPWORDS_CSV.exists():
+        return
+    now = _now_stamp()
+    rows = [{'불용어': w, '구분': '기본', '등록일시': now}
+            for w in sorted(SEED_STOPWORDS)]
+    pd.DataFrame(rows, columns=STOPWORDS_COLS).to_csv(
+        STOPWORDS_CSV, index=False, encoding='utf-8-sig')
+
+
+def load_stopwords_df():
+    """불용어 목록을 DataFrame으로 읽는다. (불용어 · 구분 · 등록일시)"""
+    init_stopwords_file()
+    try:
+        df = pd.read_csv(STOPWORDS_CSV, encoding='utf-8-sig')
+    except Exception:
+        return pd.DataFrame(columns=STOPWORDS_COLS)
+    for c in STOPWORDS_COLS:
+        if c not in df.columns:
+            df[c] = ''
+    df = df[STOPWORDS_COLS].dropna(subset=['불용어'])
+    df['불용어'] = df['불용어'].astype(str).str.strip()
+    return df[df['불용어'] != ''].drop_duplicates(subset=['불용어'])
+
+
+def save_stopwords_df(df):
+    """불용어 목록을 저장하고 드라이브에도 반영한다."""
+    df[STOPWORDS_COLS].to_csv(STOPWORDS_CSV, index=False, encoding='utf-8-sig')
+    drive_upload_csv(service, OUTPUT_ID, 'stopwords.csv', STOPWORDS_CSV)
+
+
+def add_stopwords(words):
+    """새 불용어를 등록일시와 함께 추가한다. 반환: 실제로 추가된 개수"""
+    df = load_stopwords_df()
+    exist = set(df['불용어'])
+    now = _now_stamp()
+    new = [{'불용어': w, '구분': '추가', '등록일시': now}
+           for w in sorted(set(words)) if w and w not in exist]
+    if not new:
+        return 0
+    save_stopwords_df(pd.concat(
+        [df, pd.DataFrame(new, columns=STOPWORDS_COLS)], ignore_index=True))
+    return len(new)
+
+
+def remove_stopwords(words):
+    """선택한 불용어를 삭제한다. 반환: 삭제된 개수"""
+    df = load_stopwords_df()
+    keep = df[~df['불용어'].isin(set(words))]
+    removed = len(df) - len(keep)
+    if removed:
+        save_stopwords_df(keep)
+    return removed
+
+
+def restore_seed_stopwords():
+    """기본 불용어 중 목록에서 빠진 것만 되살린다.
+       사용자가 직접 추가한 단어는 그대로 유지된다. 반환: 복원된 개수"""
+    df = load_stopwords_df()
+    exist = set(df['불용어'])
+    now = _now_stamp()
+    miss = [{'불용어': w, '구분': '기본', '등록일시': now}
+            for w in sorted(SEED_STOPWORDS) if w not in exist]
+    if not miss:
+        return 0
+    save_stopwords_df(pd.concat(
+        [df, pd.DataFrame(miss, columns=STOPWORDS_COLS)], ignore_index=True))
+    return len(miss)
 
 
 # ============================================================
@@ -1460,18 +1542,10 @@ def token_stats(word_freq, metrics, token):
 
 
 # ============================================================
-# 비교 집단
+# 집단 통계
 # ============================================================
-CASE_BASE_OPTIONS = ['같은 작성자유형', '전체 문서']
-
-
-def case_base_mask(metrics, cb_choice, target_row):
-    if cb_choice == '전체 문서' or target_row is None:
-        return pd.Series(True, index=metrics.index)
-    return metrics['작성자유형'] == target_row['작성자유형']
-
-
-def case_base_stats(values):
+def group_stats(values):
+    """값 묶음의 건수·평균·표준편차·최소·최대를 계산한다."""
     v = pd.Series(values).dropna()
     if v.empty:
         return None
@@ -1524,7 +1598,11 @@ def draw_compare_bars(metric, target_value, metrics, target_name=None,
     if finite:
         lo, hi = min(finite + [0]), max(finite + [0])
         span = (hi - lo) or (abs(hi) or 1.0)
-        ax.set_xlim(lo - span * 0.06, hi + span * 0.26)
+        # 값 라벨은 막대 끝 바깥에 놓이므로, 라벨이 뻗는 쪽에 여백을 크게 준다.
+        # (출현 편중도처럼 값이 음수면 라벨이 왼쪽으로 나가 축 이름과 겹친다)
+        left_pad  = 0.34 if any(v < 0 for v in finite) else 0.06
+        right_pad = 0.26 if any(v > 0 for v in finite) else 0.06
+        ax.set_xlim(lo - span * left_pad, hi + span * right_pad)
 
     for b, v in zip(bars, values):
         if v is None or np.isnan(v):
@@ -1848,7 +1926,7 @@ def draw_basic_vs_table(fig, trow, metrics, other, axes_rect,
         tv = float(trow[c]) if (
             trow is not None and pd.notna(trow[c])
         ) else np.nan
-        s = case_base_stats(
+        s = group_stats(
             metrics.loc[metrics['작성자유형'] == other, c]
         )
 
@@ -1934,7 +2012,7 @@ def draw_basic_vs_table(fig, trow, metrics, other, axes_rect,
     return ax
 
 
-def build_pdf_report(metrics, doc_freq, target_name, cb_choice,
+def build_pdf_report(metrics, doc_freq, target_name,
                      stopwords, top_n=10):
     """한 문서를 2쪽으로 요약한다.
        1쪽 = 기초 통계량(현재/Human/AI 막대 + 두 비교 표),
@@ -2163,6 +2241,7 @@ init_local_csvs()
 # ============================================================
 with st.sidebar:
     st.header("데이터")
+    st.caption(f"📁 문서 보관 위치\n\n{DRIVE_PATH_HINT}")
 
     if st.button("드라이브 스캔", use_container_width=True):
         meta_now = pd.read_csv(META_CSV, encoding='utf-8-sig')
@@ -2509,8 +2588,8 @@ metrics   = load_metrics(file_signature(METRICS_CSV))
 word_freq = load_word_freq(file_signature(WORD_FREQ_CSV))
 content_note = load_note()
 
-custom_sw = load_custom_stopwords()
-ALL_SW    = WC_STOPWORDS | custom_sw
+sw_df  = load_stopwords_df()
+ALL_SW = set(sw_df['불용어'])
 
 
 # ── 데이터가 없을 때 ──
@@ -2558,31 +2637,54 @@ if menu == "워드클라우드":
         st.pyplot(fig)
 
     # ── 불용어 관리 (워드클라우드 바로 아래) ──
-    with st.expander(f"불용어 관리  (직접 추가한 단어 {len(custom_sw)}개)"):
-        st.caption("워드클라우드에서 빼고 싶은 단어를 등록합니다. "
-                   "등록 내용은 드라이브에 저장되어 다음에도 유지됩니다.")
+    n_seed = int((sw_df['구분'] == '기본').sum())
+    n_add  = int((sw_df['구분'] == '추가').sum())
+    with st.expander(f"불용어 관리  (전체 {len(sw_df)}개 · 기본 {n_seed} · 추가 {n_add})"):
+        st.caption("불용어는 output 폴더의 stopwords.csv 한 파일로 관리됩니다. "
+                   "추가한 단어는 등록일시와 함께 기록되어 다음에도 유지됩니다.")
         new_input = st.text_input(
             "추가할 단어",
             placeholder="쉼표 또는 공백으로 구분 (예: 연구, 분석, 결과)")
         if st.button("추가", use_container_width=True):
             added = {w for w in re.split(r'[,\s]+', new_input) if w}
-            if added:
-                save_custom_stopwords(custom_sw | added)
-                st.success(f"{len(added)}개를 추가했습니다.")
-                st.rerun()
-            else:
+            if not added:
                 st.warning("추가할 단어를 입력해 주세요.")
-
-        if custom_sw:
-            st.divider()
-            rm = st.multiselect("삭제할 단어 선택", sorted(custom_sw))
-            if st.button("선택 삭제", use_container_width=True):
-                if rm:
-                    save_custom_stopwords(custom_sw - set(rm))
-                    st.success(f"{len(rm)}개를 삭제했습니다.")
+            else:
+                n = add_stopwords(added)
+                if n:
+                    st.success(f"{n}개를 추가했습니다.")
                     st.rerun()
                 else:
-                    st.warning("삭제할 단어를 선택해 주세요.")
+                    st.info("이미 등록되어 있는 단어입니다.")
+
+        st.divider()
+        rm = st.multiselect("삭제할 단어 선택", sorted(sw_df['불용어']))
+        if st.button("선택 삭제", use_container_width=True):
+            if rm:
+                n = remove_stopwords(rm)
+                st.success(f"{n}개를 삭제했습니다.")
+                st.rerun()
+            else:
+                st.warning("삭제할 단어를 선택해 주세요.")
+
+        recent = sw_df[sw_df['구분'] == '추가'].sort_values(
+            '등록일시', ascending=False)
+        if not recent.empty:
+            st.divider()
+            st.markdown("**직접 추가한 불용어**")
+            st.dataframe(recent[['불용어', '등록일시']],
+                         use_container_width=True, hide_index=True)
+
+        st.divider()
+        st.caption("기본 불용어를 실수로 삭제한 경우 아래에서 되살릴 수 있습니다. "
+                   "직접 추가한 단어는 그대로 유지됩니다.")
+        if st.button("기본 불용어 복원", use_container_width=True):
+            n = restore_seed_stopwords()
+            if n:
+                st.success(f"기본 불용어 {n}개를 복원했습니다.")
+                st.rerun()
+            else:
+                st.info("복원할 기본 불용어가 없습니다.")
 
     # ── 자주 쓰인 단어: 제목 옆에 표시 개수 선택 ──
     tcol, ncol = st.columns([3, 2])
@@ -2651,6 +2753,8 @@ elif menu == "문서 기초 분석":
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      hide_index=True)
+        st.caption("주요 단어 목록은 연구 목적에 맞게 코드의 KEY_WORDS에서 "
+                   "수정할 수 있습니다.")
 
         st.divider()
         st.markdown("### 단어 직접 조회")
@@ -2748,23 +2852,13 @@ elif menu == "문서 특성 분석":
                    f"목록에 표시합니다. 검색어로 범위를 좁혀 주세요.")
         names = names[:MAX_LIST]
 
-    s1, s2 = st.columns([3, 1])
-    with s1:
-        target_name = st.selectbox(f"문서 ({len(cand):,}건 중)", names,
-                                   key="target_doc")
-    with s2:
-        cb_choice = st.radio("비교 집단", CASE_BASE_OPTIONS, key="case_base")
+    target_name = st.selectbox(f"문서 ({len(cand):,}건 중)", names,
+                               key="target_doc")
 
-    trow  = metrics[metrics['파일명'] == target_name].iloc[0]
-    cb_df = metrics[case_base_mask(metrics, cb_choice, trow)]
+    trow = metrics[metrics['파일명'] == target_name].iloc[0]
 
-    if cb_choice == '같은 작성자유형':
-        cb_disp = f"같은 작성자유형 {str(trow['작성자유형']).upper()} ({len(cb_df)}건)"
-    else:
-        cb_disp = f"{cb_choice} ({len(cb_df)}건)"
     st.caption(f"선택한 문서 — **{trow['작성자유형']}** · "
-               f"**{trow['문서유형']}**  |  "
-               f"비교 집단 — **{cb_disp}**")
+               f"**{trow['문서유형']}**")
 
     st.divider()
 
@@ -2792,7 +2886,6 @@ elif menu == "문서 특성 분석":
                              expanded=False):
                 render_diversity_description(col)
 
-            s = case_base_stats(cb_df[col])
             tv = float(trow[col]) if pd.notna(trow[col]) else np.nan
 
             left, right = st.columns([3, 2])
@@ -2800,18 +2893,29 @@ elif menu == "문서 특성 분석":
             with left:
                 # 실제 수치를 그대로 비교하는 막대
                 st.pyplot(draw_compare_bars(col, tv, metrics, target_name))
-                if s:
+
+                # 작성자유형별 집단 통계 (Human / AI 각각 한 줄)
+                lines = []
+                for atype in AUTHOR_TYPES:
+                    gs = group_stats(
+                        metrics.loc[metrics['작성자유형'] == atype, col])
+                    if gs:
+                        lines.append(
+                            f"<b>{atype}</b> {gs['n']}건 &nbsp;·&nbsp; "
+                            f"평균 {gs['mean']:.3f} &nbsp;·&nbsp; "
+                            f"범위 {gs['min']:.3f} ~ {gs['max']:.3f} "
+                            f"&nbsp;·&nbsp; 표준편차 {gs['std']:.3f}")
+                if lines:
                     st.markdown(
-                        f"<div class='substat'>비교 집단 {s['n']}건 &nbsp;·&nbsp; "
-                        f"평균 {s['mean']:.3f} &nbsp;·&nbsp; "
-                        f"범위 {s['min']:.3f} ~ {s['max']:.3f} &nbsp;·&nbsp; "
-                        f"표준편차 {s['std']:.3f}</div>",
+                        "<div class='substat'>" + "<br>".join(lines) + "</div>",
                         unsafe_allow_html=True)
 
             with right:
                 st.metric("현재 문서", "-" if np.isnan(tv) else f"{tv:.3f}")
-                if s:
-                    st.metric("비교 집단 평균", f"{s['mean']:.3f}")
+                for atype in AUTHOR_TYPES:
+                    gm = group_mean(metrics, atype, col)
+                    st.metric(f"{atype} 평균",
+                              "-" if np.isnan(gm) else f"{gm:.3f}")
 
                 if col == D_SEN:
                     st.caption(
@@ -2883,7 +2987,6 @@ elif menu == "문서 특성 분석":
                 metrics,
                 load_doc_freq(file_signature(DOC_FREQ_CSV)),
                 target_name,
-                cb_choice,
                 ALL_SW,
             )
 
