@@ -2753,7 +2753,7 @@ elif menu == "문서 기초 분석":
             })
         st.dataframe(pd.DataFrame(rows), use_container_width=True,
                      hide_index=True)
-        st.caption("주요 단어 목록은 연구 목적에 맞게 코드의 KEY_WORDS에서 "
+        st.caption("주요 단어 목록은 코드의 KEY_WORDS에서 "
                    "수정할 수 있습니다.")
 
         st.divider()
